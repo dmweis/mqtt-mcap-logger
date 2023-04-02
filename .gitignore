@@ -1,3 +1,10 @@
 /target
 *.mcap
 .env
+tmp
+
+dev_settings.yaml
+
+.vscode
+
+

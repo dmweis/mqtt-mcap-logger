@@ -1,0 +1,5 @@
+mqtt:
+  broker_host: "mqtt"
+  client_id: "mqtt-mcap-logger"
+logger:
+  dir: "/var/log/mqtt-mcap-logger"

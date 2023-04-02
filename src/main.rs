@@ -1,3 +1,5 @@
+mod configuration;
+
 use anyhow::{anyhow, Context};
 use clap::Parser;
 use jsonschema::JSONSchema;
@@ -10,10 +12,13 @@ use std::{
     collections::{BTreeMap, HashMap},
     fs::{self, File},
     io::BufWriter,
+    path::PathBuf,
     sync::Arc,
     time::{Duration, Instant, SystemTime},
 };
 use tokio::sync::mpsc::unbounded_channel;
+use tracing::{dispatcher, error, info, warn, Dispatch};
+use tracing_subscriber::{prelude::__tracing_subscriber_SubscriberExt, EnvFilter, Registry};
 
 const MQTT_MAX_PACKET_SIZE: usize = 268435455;
 
@@ -23,16 +28,19 @@ const MQTT_MAX_PACKET_SIZE: usize = 268435455;
 struct Args {
     /// mcap path
     #[arg(short, long)]
-    out_dir: String,
+    out_dir: Option<String>,
     /// mqtt client id
-    #[arg(short, long)]
-    client_id: String,
+    #[arg(long)]
+    client_id: Option<String>,
     /// mqtt host
-    #[arg(short, long)]
-    address: String,
+    #[arg(long)]
+    broker_host: Option<String>,
     /// mqtt port
+    #[arg(long)]
+    broker_port: Option<u16>,
+    /// config path
     #[arg(short, long)]
-    port: u16,
+    config: Option<PathBuf>,
 }
 
 enum MqttUpdate {
@@ -42,14 +50,36 @@ enum MqttUpdate {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
+    setup_tracing()?;
 
-    let mut mqttoptions = MqttOptions::new(&args.client_id, &args.address, args.port);
-    mqttoptions.set_keep_alive(Duration::from_secs(5));
+    let mut config = configuration::get_configuration(args.config)?;
+
+    // move this somewhere else?
+    if let Some(out_dir) = args.out_dir {
+        config.logger.dir = out_dir;
+    }
+    if let Some(client_id) = args.client_id {
+        config.mqtt.client_id = client_id;
+    }
+    if let Some(broker_host) = args.broker_host {
+        config.mqtt.broker_host = broker_host;
+    }
+    if let Some(broker_port) = args.broker_port {
+        config.mqtt.broker_port = broker_port;
+    }
+
+    // mqtt options
+    let mut mqtt_options = MqttOptions::new(
+        &config.mqtt.client_id,
+        &config.mqtt.broker_host,
+        config.mqtt.broker_port,
+    );
+    mqtt_options.set_keep_alive(Duration::from_secs(5));
     // outgoing is default
-    mqttoptions.set_max_packet_size(MQTT_MAX_PACKET_SIZE, 10 * 1024);
-    println!("Starting MQTT server with options {:?}", mqttoptions);
+    mqtt_options.set_max_packet_size(MQTT_MAX_PACKET_SIZE, 10 * 1024);
+    info!(?mqtt_options, "Starting MQTT server with options",);
 
-    let (client, mut eventloop) = AsyncClient::new(mqttoptions, 10);
+    let (client, mut event_loop) = AsyncClient::new(mqtt_options, 10);
 
     client.subscribe("#", QoS::AtMostOnce).await.unwrap();
     let client_clone = client.clone();
@@ -58,25 +88,26 @@ async fn main() -> anyhow::Result<()> {
 
     tokio::spawn(async move {
         loop {
-            match eventloop.poll().await {
+            match event_loop.poll().await {
                 Ok(notification) => match notification {
                     Event::Incoming(Incoming::Publish(publish)) => {
                         if let Err(e) = message_sender.send(MqttUpdate::Message(publish)) {
-                            eprintln!("Error sending message {e}");
+                            error!(error = %e, "Error sending message");
                         }
                     }
                     Event::Incoming(Incoming::ConnAck(_)) => {
+                        info!("Connected to MQTT broker. Subscribing to all topics");
                         client.subscribe("#", QoS::AtMostOnce).await.unwrap();
                     }
                     Event::Outgoing(Outgoing::Disconnect) => {
-                        println!("Client disconnected. Shutting down");
+                        info!("Client disconnected. Shutting down");
                         break;
                     }
 
                     _ => (),
                 },
                 Err(e) => {
-                    eprintln!("Error processing eventloop notifications {e}");
+                    error!(error = %e, "Error processing event loop notifications");
                 }
             }
         }
@@ -84,11 +115,12 @@ async fn main() -> anyhow::Result<()> {
 
     tokio::spawn(async move {
         tokio::signal::ctrl_c().await.unwrap();
+        info!("Received ctrl-c, shutting down");
         client_clone.disconnect().await.unwrap();
     });
 
     let mut logger =
-        RotatingMcapLogger::new(&args.out_dir).context("Failed to create mcap writer")?;
+        RotatingMcapLogger::new(&config.logger.dir).context("Failed to create mcap writer")?;
 
     while let Some(message) = message_receiver.recv().await {
         match message {
@@ -118,6 +150,8 @@ struct RotatingMcapLogger<'a> {
 
 impl<'a> RotatingMcapLogger<'a> {
     pub fn new(directory_path: &str) -> anyhow::Result<Self> {
+        info!(directory_path, "Creating logging directory",);
+        std::fs::create_dir_all(directory_path)?;
         let mut logger = Self {
             mcap_writer: None,
             last_rotation_time: Instant::now(),
@@ -128,12 +162,19 @@ impl<'a> RotatingMcapLogger<'a> {
     }
 
     pub fn write_message(&mut self, topic: &str, payload: &[u8]) -> anyhow::Result<()> {
-        if self.last_rotation_time.elapsed() > ROTATION_INTERVAL {
+        let time_since_rotation = self.last_rotation_time.elapsed();
+        if time_since_rotation > ROTATION_INTERVAL {
+            let seconds = time_since_rotation.as_secs();
+            info!(
+                seconds_since_rotation = seconds,
+                "Rotation interval elapsed"
+            );
             self.start_new_file()?;
         }
 
         // just in case there isn't one
         if self.mcap_writer.is_none() {
+            warn!("mcap writer is none even though it shouldn't be");
             self.start_new_file()?;
         }
 
@@ -152,6 +193,7 @@ impl<'a> RotatingMcapLogger<'a> {
         let filename = format!("{}_ns.mcap", time);
         let full_path = format!("{}/{}", self.directory_path, filename);
 
+        info!(full_path, time, "starting new mcap file",);
         let mcap_writer = McapLogger::new(&full_path)?;
         self.mcap_writer = Some(mcap_writer);
         self.last_rotation_time = Instant::now();
@@ -159,6 +201,7 @@ impl<'a> RotatingMcapLogger<'a> {
     }
 
     fn finish_existing(&mut self) -> anyhow::Result<()> {
+        info!("Finishing existing mcap file");
         if let Some(mut mcap_writer) = self.mcap_writer.take() {
             mcap_writer.finish()?;
         }
@@ -213,6 +256,7 @@ impl<'a> McapLogger<'a> {
             return Ok(*channel_id);
         }
         let channel = if serde_json::from_slice::<serde_json::Value>(payload).is_ok() {
+            info!(topic, "Adding json schema for topic");
             let schema = Some(Arc::new(Schema {
                 name: JSON_SCHEMA_NAME.to_owned(),
                 encoding: JSONSCHEMA_ENCODING_NAME.to_owned(),
@@ -229,6 +273,7 @@ impl<'a> McapLogger<'a> {
                 metadata: BTreeMap::default(),
             }
         } else {
+            info!(topic, "Adding topic without schema");
             Channel {
                 topic: topic.to_owned(),
                 schema: None,
@@ -263,4 +308,17 @@ fn universal_schema() -> anyhow::Result<JSONSchema> {
     } else {
         Err(anyhow!("Failed to compile universal schema"))
     }
+}
+
+pub fn setup_tracing() -> anyhow::Result<()> {
+    let filter = EnvFilter::builder()
+        .with_default_directive(tracing_subscriber::filter::LevelFilter::INFO.into())
+        .parse("")?;
+
+    let subscriber = Registry::default()
+        .with(filter)
+        .with(tracing_logfmt::layer());
+    dispatcher::set_global_default(Dispatch::new(subscriber))
+        .context("Global logger has already been set!")?;
+    Ok(())
 }

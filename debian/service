@@ -1,0 +1,16 @@
+[Unit]
+Description=mqtt-mcap-logger
+After=network-online.target nss-lookup.target
+Wants=network-online.target
+
+[Service]
+User=mqtt-mcap-logger
+DynamicUser=yes
+StateDirectory=mqtt-mcap-logger
+Type=simple
+Restart=on-failure
+RestartSec=5s
+ExecStart=/usr/bin/mqtt-mcap-logger --config /etc/mqtt-mcap-logger/settings
+
+[Install]
+WantedBy=default.target
