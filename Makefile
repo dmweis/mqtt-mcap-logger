@@ -11,4 +11,5 @@ install: build
 
 .PHONY: install-dependencies
 install-dependencies:
+	sudo apt update && sudo apt install -y liblzma-dev dpkg dpkg-dev
 	cargo install cargo-deb
