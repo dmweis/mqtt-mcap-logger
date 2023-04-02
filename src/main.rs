@@ -21,6 +21,10 @@ use tracing::{dispatcher, error, info, warn, Dispatch};
 use tracing_subscriber::{prelude::__tracing_subscriber_SubscriberExt, EnvFilter, Registry};
 
 const MQTT_MAX_PACKET_SIZE: usize = 268435455;
+const MQTT_WILDCARD_TOPIC: &str = "#";
+/// technically speaking we want to use AtLeastOnce
+/// but honestly we don't care about message delivery here
+const MQTT_LOGGER_QOS: QoS = QoS::AtMostOnce;
 
 /// Simple program to greet a person
 #[derive(Parser, Debug)]
@@ -45,6 +49,7 @@ struct Args {
 
 enum MqttUpdate {
     Message(Publish),
+    StopLogger,
 }
 
 #[tokio::main]
@@ -81,7 +86,10 @@ async fn main() -> anyhow::Result<()> {
 
     let (client, mut event_loop) = AsyncClient::new(mqtt_options, 10);
 
-    client.subscribe("#", QoS::AtMostOnce).await.unwrap();
+    client
+        .subscribe(MQTT_WILDCARD_TOPIC, MQTT_LOGGER_QOS)
+        .await
+        .unwrap();
     let client_clone = client.clone();
 
     let (message_sender, mut message_receiver) = unbounded_channel();
@@ -92,15 +100,22 @@ async fn main() -> anyhow::Result<()> {
                 Ok(notification) => match notification {
                     Event::Incoming(Incoming::Publish(publish)) => {
                         if let Err(e) = message_sender.send(MqttUpdate::Message(publish)) {
-                            error!(error = %e, "Error sending message");
+                            // a lot of these errors are probably because the receiver has been dropped
+                            error!(error = %e, "Error sending message on mpsc channel, terminating");
+                            break;
                         }
                     }
                     Event::Incoming(Incoming::ConnAck(_)) => {
                         info!("Connected to MQTT broker. Subscribing to all topics");
-                        client.subscribe("#", QoS::AtMostOnce).await.unwrap();
+                        client
+                            .subscribe(MQTT_WILDCARD_TOPIC, MQTT_LOGGER_QOS)
+                            .await
+                            .unwrap();
                     }
                     Event::Outgoing(Outgoing::Disconnect) => {
                         info!("Client disconnected. Shutting down");
+                        // ignore error here
+                        _ = message_sender.send(MqttUpdate::StopLogger);
                         break;
                     }
 
@@ -132,10 +147,15 @@ async fn main() -> anyhow::Result<()> {
             MqttUpdate::Message(publish) => {
                 logger.write_message(&publish.topic, &publish.payload)?;
             }
+            MqttUpdate::StopLogger => {
+                info!("Received stop logger message");
+                break;
+            }
         }
     }
 
     logger.finish_existing()?;
+    info!("Finalized Mcap logger");
 
     Ok(())
 }
