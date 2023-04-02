@@ -6,7 +6,6 @@ Wants=network-online.target
 [Service]
 User=mqtt-mcap-logger
 DynamicUser=yes
-ProtectHome=false
 StateDirectory=mqtt-mcap-logger
 Type=simple
 Restart=on-failure
