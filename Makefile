@@ -7,7 +7,7 @@ build:
 
 .PHONE: install
 install: build
-	sudo dpkg -i $(ARM_BUILD_PATH)
+	sudo dpkg -i $(DEB_BUILD_PATH)
 
 .PHONY: install-dependencies
 install-dependencies:
