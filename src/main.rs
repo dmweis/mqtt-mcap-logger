@@ -16,7 +16,7 @@ use std::{
     sync::Arc,
     time::{Duration, Instant, SystemTime},
 };
-use tokio::sync::mpsc::unbounded_channel;
+use tokio::{join, sync::mpsc::unbounded_channel};
 use tracing::{dispatcher, error, info, warn, Dispatch};
 use tracing_subscriber::{prelude::__tracing_subscriber_SubscriberExt, EnvFilter, Registry};
 
@@ -114,8 +114,13 @@ async fn main() -> anyhow::Result<()> {
     });
 
     tokio::spawn(async move {
-        tokio::signal::ctrl_c().await.unwrap();
-        info!("Received ctrl-c, shutting down");
+        // let ctrlc = tokio::signal::ctrl_c();
+        let mut interrupt_stream =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt()).unwrap();
+        let mut term_stream =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).unwrap();
+        join!(interrupt_stream.recv(), term_stream.recv());
+        info!("Received interrupt, shutting down");
         client_clone.disconnect().await.unwrap();
     });
 
