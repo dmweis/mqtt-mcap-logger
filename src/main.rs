@@ -1,6 +1,7 @@
 mod configuration;
 
 use anyhow::{anyhow, Context};
+use chrono::prelude::*;
 use clap::Parser;
 use jsonschema::JSONSchema;
 use mcap::{records::MessageHeader, Channel, Schema, WriteOptions};
@@ -214,8 +215,10 @@ impl<'a> RotatingMcapLogger<'a> {
             mcap_writer.finish()?;
         }
 
-        let time = nanos_now();
-        let filename = format!("{}_ns.mcap", time);
+        let now_utc: DateTime<Utc> = Utc::now();
+        let time = now_utc.to_rfc3339();
+
+        let filename = format!("{}.mcap", time);
         let full_path = format!("{}/{}", self.directory_path, filename);
 
         info!(full_path, time, "starting new mcap file",);
