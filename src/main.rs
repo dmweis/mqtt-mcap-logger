@@ -1,4 +1,5 @@
 mod configuration;
+mod upload;
 
 use anyhow::{anyhow, Context};
 use chrono::prelude::*;
@@ -13,13 +14,16 @@ use std::{
     collections::{BTreeMap, HashMap},
     fs::{self, File},
     io::BufWriter,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::Arc,
     time::{Duration, Instant, SystemTime},
 };
 use tokio::{select, sync::mpsc::unbounded_channel};
 use tracing::{dispatcher, error, info, warn, Dispatch};
 use tracing_subscriber::{prelude::__tracing_subscriber_SubscriberExt, EnvFilter, Registry};
+use upload::UploadConfig;
+
+use crate::upload::upload_file;
 
 const MQTT_MAX_PACKET_SIZE: usize = 268435455;
 const MQTT_WILDCARD_TOPIC: &str = "#";
@@ -141,7 +145,8 @@ async fn main() -> anyhow::Result<()> {
     });
 
     let mut logger =
-        RotatingMcapLogger::new(&config.logger.dir).context("Failed to create mcap writer")?;
+        RotatingMcapLogger::new(&config.logger.dir, config.azure_upload_config.clone())
+            .context("Failed to create mcap writer")?;
 
     while let Some(message) = message_receiver.recv().await {
         match message {
@@ -158,6 +163,8 @@ async fn main() -> anyhow::Result<()> {
     logger.finish_existing()?;
     info!("Finalized Mcap logger");
 
+    logger.finalize_all_uploads().await;
+
     Ok(())
 }
 
@@ -172,16 +179,23 @@ struct RotatingMcapLogger<'a> {
     mcap_writer: Option<McapLogger<'a>>,
     last_rotation_time: Instant,
     directory_path: String,
+    uploader_config: Option<UploadConfig>,
+    upload_tasks: Vec<tokio::task::JoinHandle<()>>,
 }
 
 impl<'a> RotatingMcapLogger<'a> {
-    pub fn new(directory_path: &str) -> anyhow::Result<Self> {
+    pub fn new(
+        directory_path: &str,
+        uploader_config: Option<UploadConfig>,
+    ) -> anyhow::Result<Self> {
         info!(directory_path, "Creating logging directory",);
         std::fs::create_dir_all(directory_path)?;
         let mut logger = Self {
             mcap_writer: None,
             last_rotation_time: Instant::now(),
             directory_path: directory_path.to_owned(),
+            uploader_config,
+            upload_tasks: vec![],
         };
         logger.start_new_file()?;
         Ok(logger)
@@ -211,9 +225,7 @@ impl<'a> RotatingMcapLogger<'a> {
     }
 
     fn start_new_file(&mut self) -> anyhow::Result<()> {
-        if let Some(mut mcap_writer) = self.mcap_writer.take() {
-            mcap_writer.finish()?;
-        }
+        self.finish_existing()?;
 
         let now_utc: DateTime<Utc> = Utc::now();
         let time = now_utc.to_rfc3339();
@@ -232,12 +244,46 @@ impl<'a> RotatingMcapLogger<'a> {
         info!("Finishing existing mcap file");
         if let Some(mut mcap_writer) = self.mcap_writer.take() {
             mcap_writer.finish()?;
+
+            let file_path = mcap_writer.file_path().to_owned();
+            if let Some(uploader_config) = self.uploader_config.clone() {
+                info!("Starting upload");
+                let file_name = Path::new(&file_path)
+                    .file_name()
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .to_string();
+                let join_handle = tokio::spawn(async move {
+                    if let Err(error) = upload_file(&file_path, &file_name, &uploader_config).await
+                    {
+                        error!("Failed upload {}", error);
+                    } else {
+                        info!("Upload complete");
+                    }
+                });
+
+                // clean up old tasks
+                self.upload_tasks.retain(|task| !task.is_finished());
+                self.upload_tasks.push(join_handle);
+            }
         }
         Ok(())
+    }
+
+    async fn finalize_all_uploads(&mut self) {
+        info!("Finalizing all uploads");
+        let upload_finished = futures::future::join_all(self.upload_tasks.drain(..)).await;
+        for result in upload_finished {
+            if let Err(error) = result {
+                error!("Failed to finalize upload {}", error);
+            }
+        }
     }
 }
 
 struct McapLogger<'a> {
+    file_path: String,
     mcap: mcap::Writer<'a, BufWriter<File>>,
     channel_map: HashMap<String, u16>,
     channel_message_counter: HashMap<u16, u32>,
@@ -254,10 +300,15 @@ impl<'a> McapLogger<'a> {
         let writer_options = WriteOptions::new().chunk_size(Some(MCAP_CHUNK_SIZE));
         let mcap = writer_options.create(BufWriter::new(fs::File::create(file_path)?))?;
         Ok(Self {
+            file_path: file_path.to_owned(),
             mcap,
             channel_map: HashMap::new(),
             channel_message_counter: HashMap::new(),
         })
+    }
+
+    pub fn file_path(&self) -> &str {
+        &self.file_path
     }
 
     pub fn write_message(&mut self, topic: &str, payload: &[u8]) -> anyhow::Result<()> {

@@ -7,7 +7,7 @@ name = "mqtt-mcap-logger"
 publish = false
 readme = "README.md"
 repository = "https://github.com/dmweis/mqtt-mcap-logger"
-version = "0.1.8"
+version = "0.2.0"
 
 [package.metadata.deb]
 assets = [
@@ -32,9 +32,10 @@ maintainer-scripts = "debian/"
 mcap = "0.6.0"
 # mcap = {git = "https://github.com/dmweis/mcap", branch = "dmw/flush-on-chunk-finish"}
 memmap2 = "0.5.10"
-rumqttc = "0.20.0"
+rumqttc = "0.21.0"
 
 # async
+futures = "0.3"
 tokio = {version = "1", features = ["full"]}
 
 # utils
@@ -57,3 +58,10 @@ tracing-subscriber = {version = "0.3", features = [
 # error handling
 anyhow = "1.0"
 thiserror = "1.0"
+
+# azure upload
+azure_core = "0.11"
+azure_storage = "0.11"
+azure_storage_blobs = "0.11"
+bytes = "1.4"
+md5 = "0.7"

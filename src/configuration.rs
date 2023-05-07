@@ -2,6 +2,8 @@ use serde::Deserialize;
 use std::{path::PathBuf, str};
 use tracing::info;
 
+use crate::upload::UploadConfig;
+
 /// Use default config if no path is provided
 pub fn get_configuration(config: Option<PathBuf>) -> Result<AppConfig, anyhow::Error> {
     let mut config_builder = config::Config::builder();
@@ -31,6 +33,7 @@ pub fn get_configuration(config: Option<PathBuf>) -> Result<AppConfig, anyhow::E
 pub struct AppConfig {
     pub mqtt: MqttConfig,
     pub logger: LoggerConfig,
+    pub azure_upload_config: Option<UploadConfig>,
 }
 
 // weird serde default thing

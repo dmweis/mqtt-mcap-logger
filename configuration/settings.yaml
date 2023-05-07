@@ -3,3 +3,8 @@ mqtt:
   client_id: "mqtt-mcap-logger"
 logger:
   dir: "/var/lib/mqtt-mcap-logger/data"
+azure_upload_config:
+  sas_token: FOO
+  storage_account: BAR
+  container: BONK
+  storage_path: BOOP
