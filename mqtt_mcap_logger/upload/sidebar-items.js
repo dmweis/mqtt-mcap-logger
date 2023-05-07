@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["CHUNK_SIZE","FIELDS","MB_BYTES_MULTIPLIER"],"enum":["__Field"],"fn":["map_file","upload_file"],"struct":["UploadConfig","__FieldVisitor","__Visitor"]};
